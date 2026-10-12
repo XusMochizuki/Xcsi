@@ -1,0 +1,8 @@
+upstream/
+build/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+__pycache__/
+runs/
