@@ -28,6 +28,8 @@
 #include "esp_now.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
 
 #define CONFIG_LESS_INTERFERENCE_CHANNEL   1
 
@@ -52,6 +54,42 @@
 
 static const uint8_t CONFIG_CSI_SEND_MAC[] = {0x1a, 0x00, 0x00, 0x00, 0x00, 0x00};
 static const char *TAG = "csi_send";
+
+/* PLL retune/relock (same commands as csi_recv): 'F' + 4 ASCII digits = MHz,
+ * 'r' = relock at the current frequency. Applied in the send loop between
+ * packets. phy_set_freq() is private libphy (ESP-IDF v6.0.2 C6).
+ * 'P' + 4 ASCII digits = send rate in Hz (1..1000, 1 ms tick). */
+extern void phy_set_freq(unsigned mhz, int offset_khz);
+static volatile uint16_t s_lo_cmd_mhz;
+static uint16_t s_lo_mhz;
+static volatile uint16_t s_send_hz = CONFIG_SEND_FREQUENCY;
+
+static void lo_cmd_task(void *arg)
+{
+    uint8_t c;
+
+    for (;;) {
+        if (usb_serial_jtag_read_bytes(&c, 1, portMAX_DELAY) != 1) {
+            continue;
+        }
+        if (c == 'r') {
+            s_lo_cmd_mhz = s_lo_mhz ? s_lo_mhz : 2412;
+        } else if (c == 'F' || c == 'P') {
+            char d[4];
+            if (usb_serial_jtag_read_bytes(d, 4, pdMS_TO_TICKS(100)) == 4) {
+                unsigned v = 0;
+                for (int i = 0; i < 4; i++) {
+                    v = v * 10 + (unsigned)(d[i] - '0');
+                }
+                if (c == 'F' && v >= 2300 && v <= 2500) {
+                    s_lo_cmd_mhz = v;
+                } else if (c == 'P' && v >= 1 && v <= 1000) {
+                    s_send_hz = v;
+                }
+            }
+        }
+    }
+}
 
 static void wifi_init()
 {
@@ -166,14 +204,26 @@ void app_main()
     ESP_LOGI(TAG, "wifi_channel: %d, send_frequency: %d, mac: " MACSTR,
              CONFIG_LESS_INTERFERENCE_CHANNEL, CONFIG_SEND_FREQUENCY, MAC2STR(CONFIG_CSI_SEND_MAC));
 
+    usb_serial_jtag_driver_config_t usb_cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usb_cfg));
+    usb_serial_jtag_vfs_use_driver();
+    xTaskCreate(lo_cmd_task, "lo_cmd", 2048, NULL, 4, NULL);
+
     TickType_t last_wake = xTaskGetTickCount();
     for (uint32_t count = 0; ; ++count) {
+        uint16_t mhz = s_lo_cmd_mhz;
+        if (mhz) {
+            s_lo_cmd_mhz = 0;
+            phy_set_freq(mhz, 0);
+            s_lo_mhz = mhz;
+            ESP_LOGI(TAG, "lo: %u MHz", mhz);
+        }
         esp_err_t ret = esp_now_send(peer.peer_addr, (const uint8_t *)&count, sizeof(count));
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "free_heap: %ld <%s> ESP-NOW send error", esp_get_free_heap_size(), esp_err_to_name(ret));
         }
 
         /* Fixed period; usleep() after the send would add the send time to every cycle. */
-        xTaskDelayUntil(&last_wake, pdMS_TO_TICKS(1000 / CONFIG_SEND_FREQUENCY));
+        xTaskDelayUntil(&last_wake, pdMS_TO_TICKS(1000 / s_send_hz));
     }
 }

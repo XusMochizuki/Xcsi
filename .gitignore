@@ -6,3 +6,4 @@ sdkconfig
 sdkconfig.old
 __pycache__/
 runs/
+research/ext/

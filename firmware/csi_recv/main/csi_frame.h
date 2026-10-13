@@ -18,6 +18,7 @@
 
 #define CSI_FRAME_FLAG_FIRST_WORD_INVALID   (1 << 0)
 #define CSI_FRAME_FLAG_GAIN_FORCED          (1 << 1)   /* RX gain locked (host command 'g') */
+#define CSI_FRAME_FLAG_RELOCK_SHIFT         8          /* bits 8..15: PLL relock count mod 256 ('F'/'r') */
 
 typedef struct __attribute__((packed)) {
     uint8_t  magic[2];      /* CSI_FRAME_MAGIC0, CSI_FRAME_MAGIC1 */
@@ -45,7 +46,7 @@ typedef struct __attribute__((packed)) {
     uint16_t rx_seq;        /* 802.11 sequence number */
     uint32_t he_siga1;
     uint16_t he_siga2;
-    uint16_t reserved1;
+    uint16_t lo_mhz;        /* RF PLL frequency set by host 'F'/'r', 0 = untouched */
 } csi_frame_hdr_t;
 
 _Static_assert(sizeof(csi_frame_hdr_t) == 48, "csi_frame_hdr_t layout changed");

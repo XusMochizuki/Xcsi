@@ -168,6 +168,27 @@ static volatile gain_state_t s_gain_state = GAIN_AUTO;
 static volatile bool s_gain_cmd_lock;
 static volatile bool s_gain_cmd_auto;
 
+/* PLL retune/relock, driven by host commands 'F' + 4 digits (MHz) and 'r'.
+ * phy_set_freq() is a private libphy function (the one ESP-SDR uses to
+ * program the RF PLL off the Wi-Fi channel grid); ESP-IDF v6.0.2 C6 libphy. */
+extern void phy_set_freq(unsigned mhz, int offset_khz);
+static volatile uint16_t s_lo_cmd_mhz;      /* pending request, 0 = none */
+static uint16_t s_lo_mhz;                   /* 0 = never touched (channel 1 default) */
+static uint8_t s_relock_count;
+
+/* Called from the CSI callback (Wi-Fi task), so the PLL write is serialized with RX processing. */
+static void lo_update(void)
+{
+    uint16_t mhz = s_lo_cmd_mhz;
+    if (mhz) {
+        s_lo_cmd_mhz = 0;
+        phy_set_freq(mhz, 0);
+        s_lo_mhz = mhz;
+        s_relock_count++;
+        ESP_EARLY_LOGI(TAG, "lo: %u MHz, relock %u", mhz, s_relock_count);
+    }
+}
+
 /* Called from the CSI callback (Wi-Fi task), as the official examples do. */
 static void gain_ctrl_update(uint8_t agc_gain, int8_t fft_gain)
 {
@@ -246,13 +267,15 @@ static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
     if (s_gain_state == GAIN_FORCED) {
         hdr->flags |= CSI_FRAME_FLAG_GAIN_FORCED;
     }
+    lo_update();
+    hdr->flags |= (uint16_t)s_relock_count << CSI_FRAME_FLAG_RELOCK_SHIFT;
     hdr->rx_state     = rx_ctrl->rx_state;
     hdr->temp_c       = s_temp_c;
     hdr->sig_len      = rx_ctrl->sig_len;
     hdr->rx_seq       = info->rx_seq;
     hdr->he_siga1     = rx_ctrl->he_siga1;
     hdr->he_siga2     = rx_ctrl->he_siga2;
-    hdr->reserved1    = 0;
+    hdr->lo_mhz       = s_lo_mhz;
     memcpy(s_frame.csi, info->buf, info->len);
 
     /* Queue full: frame is dropped, the host sees it as a frame_seq gap. */
@@ -284,8 +307,10 @@ static void csi_output_task(void *arg)
     }
 }
 
-/* Host commands, one byte each: 'g' = lock RX gain at the median of the next
- * GAIN_BASELINE_SAMPLES frames, 'a' = back to automatic gain. */
+/* Host commands: 'g' = lock RX gain at the median of the next
+ * GAIN_BASELINE_SAMPLES frames, 'a' = back to automatic gain,
+ * 'F' + 4 ASCII digits = retune the RF PLL to that MHz, 'r' = relock at the
+ * current frequency (2412 if never retuned). Applied on the next CSI frame. */
 static void csi_cmd_task(void *arg)
 {
     uint8_t c;
@@ -298,6 +323,19 @@ static void csi_cmd_task(void *arg)
             s_gain_cmd_lock = true;
         } else if (c == 'a') {
             s_gain_cmd_auto = true;
+        } else if (c == 'r') {
+            s_lo_cmd_mhz = s_lo_mhz ? s_lo_mhz : 2412;
+        } else if (c == 'F') {
+            char d[4];
+            if (usb_serial_jtag_read_bytes(d, 4, pdMS_TO_TICKS(100)) == 4) {
+                unsigned mhz = 0;
+                for (int i = 0; i < 4; i++) {
+                    mhz = mhz * 10 + (unsigned)(d[i] - '0');
+                }
+                if (mhz >= 2300 && mhz <= 2500) {
+                    s_lo_cmd_mhz = mhz;
+                }
+            }
         }
     }
 }

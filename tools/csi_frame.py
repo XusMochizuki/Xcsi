@@ -19,6 +19,7 @@ VERSION = 1
 MAX_CSI_LEN = 512
 FLAG_FIRST_WORD_INVALID = 1 << 0
 FLAG_GAIN_FORCED = 1 << 1
+RELOCK_SHIFT = 8  # flags bits 8..15: PLL relock count mod 256
 
 # Must match csi_frame_hdr_t.
 HDR_FMT = "<2sBBHHIII6sbbBBBBBbBbHHIHH"
@@ -28,7 +29,7 @@ Header = namedtuple(
     "Header",
     "magic version hdr_len csi_len flags frame_seq tx_seq timestamp_us mac rssi noise_floor "
     "channel second rate bb_format agc_gain fft_gain rx_state temp_c sig_len rx_seq "
-    "he_siga1 he_siga2 reserved1",
+    "he_siga1 he_siga2 lo_mhz",
 )
 
 
